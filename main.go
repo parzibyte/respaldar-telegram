@@ -4,10 +4,12 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -26,6 +28,8 @@ const MaximoTamañoArchivoTelegram = (1024 * 1024 * 49)
 // 10 al momento de escribir esto
 const MaximaCantidadDeArchivosPorMensaje = 10
 
+const MaximosIntentosEnvioArchivo = 10
+
 type InputMedia struct {
 	Type    string `json:"type"`
 	Media   string `json:"media"`
@@ -33,18 +37,20 @@ type InputMedia struct {
 }
 
 type Mensaje struct {
-	ChatId    string `json:"chat_id"`
-	Text      string `json:"text"`
-	ParseMode string `json:"parse_mode"`
+	ChatId              string `json:"chat_id"`
+	Text                string `json:"text"`
+	ParseMode           string `json:"parse_mode"`
+	DisableNotification bool   `json:"disable_notification"`
 }
 
 func enviarMensaje(contenidoDelMensaje string, token string, idChat string) error {
 	clienteHttp := &http.Client{}
 	url := "https://api.telegram.org/bot" + token + "/sendMessage"
 	mensaje := Mensaje{
-		ChatId:    idChat,
-		Text:      contenidoDelMensaje,
-		ParseMode: "HTML",
+		ChatId:              idChat,
+		Text:                contenidoDelMensaje,
+		ParseMode:           "HTML",
+		DisableNotification: true,
 	}
 	mensajeCodificado, err := json.Marshal(mensaje)
 	if err != nil {
@@ -102,6 +108,23 @@ func separarArchivoEnVariasPartes(ubicacionArchivoOriginal string, tamañoDeFrag
 	}
 	return ubicaciones, nil
 }
+
+func enviarUnArchivoReintentando(ubicacion string, token string, idChat string, maximosIntentos int) error {
+	intentos := 0
+	var err error
+	for intentos < maximosIntentos {
+		err = enviarUnArchivo(ubicacion, token, idChat)
+		if err == nil {
+			return nil
+		} else {
+
+			enviarMensaje(fmt.Sprintf("Error enviando un archivo. Intento %d de %d", intentos, maximosIntentos), token, idChat)
+			intentos++
+		}
+
+	}
+	return errors.New("Máximos intentos alcanzados")
+}
 func enviarUnArchivo(ubicacion string, token string, idChat string) error {
 	file, err := os.Open(ubicacion)
 	if err != nil {
@@ -121,6 +144,11 @@ func enviarUnArchivo(ubicacion string, token string, idChat string) error {
 	}
 
 	err = writer.WriteField("chat_id", idChat)
+	if err != nil {
+		return err
+	}
+
+	err = writer.WriteField("disable_notification", "true")
 	if err != nil {
 		return err
 	}
@@ -192,7 +220,7 @@ func crearZipDeDirectorio(ubicacionDirectorio, nombreArchivoZip string) error {
 	})
 }
 
-func crearZip(ubicacionArchivo, nombreArchivoZip string) error {
+func crearZip(ubicacionArchivo, nombreArchivoZip, ubicacionBase string) error {
 	archivoZip, err := os.Create(nombreArchivoZip)
 	if err != nil {
 		return err
@@ -200,11 +228,16 @@ func crearZip(ubicacionArchivo, nombreArchivoZip string) error {
 	defer archivoZip.Close()
 	escritorZip := zip.NewWriter(archivoZip)
 	defer escritorZip.Close()
-	return agregarArchivoAZip(escritorZip, ubicacionArchivo, ".")
+	return agregarArchivoAZip(escritorZip, ubicacionArchivo, ubicacionBase)
 }
 
 func respaldar(ubicacion string, token string, idChat string) error {
-	salida := "salida.zip"
+	ubicacionActual, err := os.Getwd()
+	if err != nil {
+		log.Printf("Error obteniendo ubicación actual %v", err)
+		return err
+	}
+	salida := filepath.Join(ubicacionActual, "salida.zip")
 	mensaje := fmt.Sprintf("Respaldando <b>%s</b>\n", ubicacion)
 	informacionDeArchivoODirectorioParaRespaldar, err := os.Stat(ubicacion)
 	if err != nil {
@@ -220,15 +253,17 @@ func respaldar(ubicacion string, token string, idChat string) error {
 			if err != nil {
 				return err
 			}
-			return enviarUnArchivo(ubicacion, token, idChat)
+			return enviarUnArchivoReintentando(ubicacion, token, idChat, MaximosIntentosEnvioArchivo)
 		}
-		err = crearZip(ubicacion, salida)
+		err = crearZip(ubicacion, salida, ubicacionActual)
 	}
 	if err != nil {
+		log.Printf("Error creando zip %v", err)
 		return err
 	}
 	informacionArchivoParaRespaldar, err := os.Stat(salida)
 	if err != nil {
+		log.Printf("Error obteniendo informacion %v", err)
 		return err
 	}
 	if informacionArchivoParaRespaldar.Size() <= MaximoTamañoArchivoTelegram {
@@ -237,7 +272,7 @@ func respaldar(ubicacion string, token string, idChat string) error {
 		if err != nil {
 			return err
 		}
-		err = enviarUnArchivo(salida, token, idChat)
+		err = enviarUnArchivoReintentando(salida, token, idChat, MaximosIntentosEnvioArchivo)
 		if err != nil {
 			return err
 		}
@@ -245,6 +280,8 @@ func respaldar(ubicacion string, token string, idChat string) error {
 	} else {
 		ubicaciones, err := separarArchivoEnVariasPartes(salida, MaximoTamañoArchivoTelegram)
 		if err != nil {
+
+			log.Printf("Error separando archivo en varias partes %v", err)
 			return err
 		}
 		cantidadUbicaciones := len(ubicaciones)
@@ -254,8 +291,7 @@ func respaldar(ubicacion string, token string, idChat string) error {
 			return err
 		}
 		for _, ubicacion := range ubicaciones {
-
-			err = enviarUnArchivo(ubicacion, token, idChat)
+			err = enviarUnArchivoReintentando(ubicacion, token, idChat, MaximosIntentosEnvioArchivo)
 			if err != nil {
 				return err
 			}
