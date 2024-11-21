@@ -118,8 +118,8 @@ func enviarUnArchivoReintentando(ubicacion string, token string, idChat string, 
 			return nil
 		} else {
 
-			enviarMensaje(fmt.Sprintf("Error enviando un archivo. Intento %d de %d", intentos, maximosIntentos), token, idChat)
 			intentos++
+			enviarMensaje(fmt.Sprintf("Error enviando %s. Intento %d de %d", ubicacion, intentos, maximosIntentos), token, idChat)
 		}
 
 	}
@@ -237,7 +237,8 @@ func respaldar(ubicacion string, token string, idChat string) error {
 		log.Printf("Error obteniendo ubicación actual %v", err)
 		return err
 	}
-	salida := filepath.Join(ubicacionActual, "salida.zip")
+	nombreArchivoSinExtension := filepath.Base(ubicacion)
+	salida := filepath.Join(ubicacionActual, nombreArchivoSinExtension+".zip")
 	mensaje := fmt.Sprintf("Respaldando <b>%s</b>\n", ubicacion)
 	informacionDeArchivoODirectorioParaRespaldar, err := os.Stat(ubicacion)
 	if err != nil {
